@@ -101,7 +101,8 @@ def GaussianFT(width,weight,n):
         amplitude of nth Harmonic
 
     """
-    return weight/np.sqrt(2*np.pi/width**2)*np.exp(-width**2*n**2/2)
+    norm = width/np.sqrt(2*np.pi)
+    return weight*norm * np.exp(-width**2*n**2/2)
 
 #%% classes
 class Interaction():
@@ -154,11 +155,13 @@ class FiboSim():
         self.d=d
         FN = Fibonacci(N) 
         FNp1 = Fibonacci(N+1)
-        self.omega = np.array([1,FN/FNp1]) # frequency vector
+        self.omega = np.array([1,FNp1/FN]) # frequency vector
         
         # rotation matrix
-        self.W = np.array([[FNp1,FN],
-                      [FN,-FNp1]])
+        # self.W = np.array([[FNp1,FN],
+        #               [FN,-FNp1]])
+        self.W = np.array([[FN,FNp1],
+                      [FNp1,-FN]])
         
         self.site_dict = {} # dictionary of sites, keys = int index, entries = tuples of site-vectors
         ctr = 0 # counter
@@ -169,10 +172,10 @@ class FiboSim():
         lie within the first zone since the width of the strip has some quasiperiodic modulation
         so, just pad to be safe, and only record the points that fall within the zone
         """
-        vert = FN+FNp1-1 # vertical width of reduced zone strip
+        vert = FN*FNp1 +1 # vertical width of reduced zone strip
         for n1 in range(-L,L+1):
             # define approximate strip boundaryies for each n1
-            n2min = np.int(np.ceil(n1*FN/FNp1))-1 # increases with average F(N)/F(N+1)
+            n2min = np.int(np.ceil(n1*FNp1/FN))-2 # increases with average F(N)/F(N+1)
             n2max = n2min+vert
             for n2 in range(n2min,n2max+1):
                 x = np.array([n1,n2])
@@ -273,14 +276,15 @@ class FiboSim():
                 # fold that back into the reduced zone
                 # keep track of the folding vector so that we can apply an appropriate phase
                 n2_folded,shift = Fold(n2,self.W, give_folding_vec=True)
-                phase = np.exp(1j*flux*shift) # pick up flux each time you go around the compact direction 
+                overall_phase = np.exp(1j*flux*shift) # pick up flux each time you go around the compact direction 
 
                 key = (0,n2_folded[0],n2_folded[1])
                 # check if that regular and folded final state are both part of the truncated Hilbert space
                 if key in self.inv_state_dict.keys():
                     # if so, add the operator for the component
-                    state_index = self.inv_state_dict[key]
-                    self.K[state_index:state_index+self.d,state_index:state_index+self.d] += phase * pulse_amplitudes[m]*operator
+                    state1 = self.inv_state_dict[(0,n[0],n[1])] 
+                    state2 = self.inv_state_dict[key]
+                    self.K[state1:state1+self.d,state2:state2+self.d] += overall_phase * pulse_amplitudes[cutoff+m]*operator
     
                 
     def add_constant_term(self,interaction_term):
@@ -341,8 +345,9 @@ class FiboSim():
                 # check that new-site is in truncated strip
                 if key in self.inv_state_dict.keys():
                     # if so, add the operator for the component
-                    state_index = self.inv_state_dict[key]
-                    self.K[state_index:state_index+self.d,state_index:state_index+self.d] += overall_phase * amplitude/2*operator
+                    state1 = self.inv_state_dict[(0,n[0],n[1])] 
+                    state2 = self.inv_state_dict[key]
+                    self.K[state1:state1+self.d,state2:state2+self.d] += overall_phase * amplitude/2*operator
     
             
     
@@ -385,37 +390,91 @@ class FiboSim():
                 if (n1,n2) in self.inv_site_dict.keys():
                     plt.scatter(n1,n2,s=20,c='red',marker='x')
                 #else:
+                      
+    def plot_interactions(self,site,scale=1):
+        """
+        """
+        scale=1
+        colors = plt.cm.gnuplot(np.linspace(0,0.8,100))
+        #plt.figure()
+        fig, ax = plt.subplots()
+        circles = []
+        n1 = np.array(self.site_dict[site])
+        # plot grid of all sites
+        for s in range(self.size):
+            n = np.array(self.site_dict[s])
+            plt.scatter(n[0],n[1],s=4,c='black')
+            
+        # mark reference site with x
+        plt.scatter(n1[0],n1[1],s=20,c='red',marker='x')
+        # plot points for other sites that reference site is coupled to
+        # with size and color indicative of strength of coupling
+        for s2 in range(self.size):
+            if s2!=site:
+                n2 = np.array(self.site_dict[s2])
                 
+                i1 = self.inv_state_dict[(0,n1[0],n1[1])]
+                i2 = self.inv_state_dict[(0,n2[0],n2[1])]
+                hnorm = np.sqrt(np.sum(np.abs(self.K[i1:i1+self.d,i2:i2+self.d])**2))
+         
+                if hnorm>1e-10:   
+                    color = colors[np.min([99,np.int(hnorm*99)])]
+                    #plt.scatter(n2[0],n2[1],s=50*hnorm,c=color)
+                    circles += [plt.Circle(tuple(n2),
+                                           radius = scale*hnorm, 
+                                           color = color,
+                                           alpha=0.5)]
+        [ax.add_artist(c) for c in circles]           
+        plt.show()     
+             
 #%% dev
 # d=2
 # N=3
-# L=5
+# L=10
 # sim = FiboSim(d,N,L)
 
 
 
-# # define the drive Hamiltonian
-# # define gaussian pulse                  
+# define the drive Hamiltonian
+# x_drive = Interaction({'type':'cos',
+#                         'operator':PAULI['X'],
+#                         'parameters': {'freq':0,
+#                                       'amplitude':1.0,
+#                                       'phase':0}
+#                         })
+# z_drive = Interaction({'type':'cos',
+#                         'operator':PAULI['Z'],
+#                         'parameters': {'freq':1,
+#                                       'amplitude':0.5,
+#                                       'phase':np.pi/2}
+#                         })
+# sim.interactions=[x_drive,z_drive]
+# sim.setup_K()
+
+
+# #define gaussian pulse                  
 # pulse1 = Interaction({'type':'Gaussian',
-#                      'operator':PAULI['Z'],
-#                      'parameters': {'freq':0,
-#                                     'width':0.5,
+#                       'operator':PAULI['Z'],
+#                       'parameters': {'freq':0,
+#                                     'width':1.0,
 #                                     'weight':np.pi/2,
-#                                     'cutoff':1}
-#                      }
+#                                     'cutoff':5}
+#                       }
 #                     )
 # pulse2 = Interaction({'type':'Gaussian',
-#                      'operator':PAULI['Z'],
-#                      'parameters': {'freq':1,
+#                       'operator':PAULI['Z'],
+#                       'parameters': {'freq':1,
 #                                     'width':0.5,
 #                                     'weight':np.pi/2,
 #                                     'cutoff':5}
-#                      }
+#                       }
 #                     )
-
-        
 # sim.interactions = [pulse1,pulse2]
-# #sim.setup_K()
+# sim.setup_K()
+
+           
+# s1 = np.floor(sim.size/2)
+# sim.plot_interactions(s1)
 
 # N_sweep = 11
 # fluxes = np.linspace(-np.pi,np.pi,N_sweep)
