@@ -50,7 +50,7 @@ def Fibonacci(N):
     else:
         return Fibonacci(N-1)+Fibonacci(N-2)
 
-def Fold(x,W):
+def Fold(x,W,give_folding_vec=False):
     """
     Folds a generic point in ZxZ frequency lattice back into the reduced zone
 
@@ -60,20 +60,26 @@ def Fold(x,W):
         original lattice position
     W : GL(2,Z) matrix as 2x2 integer np.array 
         Rotates tilted lattice into original one 
-
-    Returns
+    give_folding_vec: bool (optional)
+        if true => returns number of translations used to fold back into zone
+        
+    Returns:
     -------
     x_folded = x folded back into reduced zone
-
+    
     """
     # shift before folding so that reduced zone includes (0,0), 
     # and goes through upper right and lower left quadrants
     shift = W[1,:]-np.array([1,0]) 
     y = la.solve(W,x+shift) # y = W^{-1}x, coordinate in tilted lattice
-    y[1] = np.mod(y[1],1) # fold back into zone
+    
+    y_folded = [y[0],np.mod(y[1],1)] # fold back into zone
     
     # rotate back to original lattice (return as int, and undo shift)
-    return np.around(W@y-shift).astype(int)
+    if give_folding_vec:
+        return np.around(W@y_folded-shift).astype(int), (y[1]-y_folded[1]).astype(int)
+    else:        
+        return np.around(W@y_folded-shift).astype(int)
     
 #%% Pulses
 def GaussianFT(width,weight,n):
@@ -125,7 +131,6 @@ class FiboSim():
     """
     Simulator object
     """
-    
     def __init__(self,d,N,L):
         """
         initialize object
@@ -194,7 +199,7 @@ class FiboSim():
         self.interactions = [] # list of interaction pulses
         self.K = np.zeros([self.Hsize,self.Hsize],dtype=complex) # quasi-Floquet-zone effective Hamiltonian, K 
 
-    def setup_K(self,interactions=[]):
+    def setup_K(self,flux=0):
         """
         
 
@@ -202,12 +207,16 @@ class FiboSim():
         ----------
         pulses : list of Interactions, optional
             DESCRIPTION. The default is [].
-
+        
+        flux : float in [0,2pi)
+            flux through compactified direction of strip
+            
         Returns
         -------
         None.
 
         """
+        self.K = np.zeros([self.Hsize,self.Hsize],dtype=complex)
         
         # drive-indpendent diagonal terms
         for s in self.state_dict.keys(): # loop over extended Hilbert space
@@ -218,19 +227,29 @@ class FiboSim():
         # other terms
         for v in self.interactions:
             if v.attributes['type']=='Gaussian':
-                self.add_gaussian_pulse(v)
+                self.add_gaussian_pulse(v,flux)
+            elif v.attributes['type']=='cos':
+                self.add_cos_drive(v,flux)
+            elif v.attributes['type']=='constant':
+                self.add_constant_term(v)
             else:
                 raise NotImplementedError('Interaction type %s not implemented')
     
-    def add_gaussian_pulse(self,pulse):
+    def add_gaussian_pulse(self,pulse,flux=0):
         """
         adds a Gaussian pulse to K
 
         Parameters
         ----------
         pulse : Interaction object
-            must be gaussian pulse.
-
+            pulse.['attributes']['parameters'] must contain:
+                'freq': int = 0,1 which frequency axis the pulse is on (e.g. if 0 then train of gaussian pulses with period 1, if 1, then period 1/PHI)
+                'width': float, >0, gaussian width (std-dev)
+                'weight': float, integrated weight of gaussian
+                'cutoff': int >0, cut off frequency shifts by larger magnitude than cutoff
+        
+        flux : float between 0 and 2pi
+            flux through compactified direction of reduced zone strip
         Returns
         -------
         None.
@@ -252,14 +271,98 @@ class FiboSim():
                 n2[freq]+=m
                 
                 # fold that back into the reduced zone
-                n2_folded = Fold(n2,self.W).astype(int)
-                
+                # keep track of the folding vector so that we can apply an appropriate phase
+                n2_folded,shift = Fold(n2,self.W, give_folding_vec=True)
+                phase = np.exp(1j*flux*shift) # pick up flux each time you go around the compact direction 
+
+                key = (0,n2_folded[0],n2_folded[1])
                 # check if that regular and folded final state are both part of the truncated Hilbert space
-                if (np.abs(n2_folded[0])<=self.L) and (np.abs(n2[0])<=self.L): 
+                if key in self.inv_state_dict.keys():
                     # if so, add the operator for the component
-                    state_index = self.inv_state_dict[(0,n2_folded[0],n2_folded[1])]
-                    self.K[state_index:state_index+self.d,state_index:state_index+self.d] += pulse_amplitudes[m]*operator
+                    state_index = self.inv_state_dict[key]
+                    self.K[state_index:state_index+self.d,state_index:state_index+self.d] += phase * pulse_amplitudes[m]*operator
+    
                 
+    def add_constant_term(self,interaction_term):
+        """
+        adds a constant, time-independent term (uniform on frequency lattice)
+
+        Parameters
+        ----------
+        interaction_term : interaction
+
+        Returns
+        -------
+        None.
+
+        """
+        for site in self.site_dict.keys():
+            n = self.site_dict[site]
+            state_index = self.inv_state_dict[(0,n[0],n[1])]
+            self.K[state_index:state_index+self.d,state_index:state_index+self.d] += interaction_term.attributes['operator']
+    
+    def add_cos_drive(self,pulse,flux=0):
+        """
+        adds A*cos(wt+phi) type-drive
+
+        Parameters
+        ----------
+        pulse : Interaction object
+            pulse.['attributes']['parameters'] must contain:
+                'freq': int = 0,1 which frequency axis the pulse is on (e.g. if 0 then train of gaussian pulses with period 1, if 1, then period 1/PHI)
+                'amplitude': float, >0, amplitude
+                'phase': float, phase offset
+                'cutoff': int >0, cut off frequency shifts by larger magnitude than cutoff
+        
+        flux : float between 0 and 2pi
+            flux through compactified direction of reduced zone strip
+        Returns
+        -------
+        None.
+        """
+        operator = pulse.attributes['operator'] # operator associated with pulse
+        freq = pulse.attributes['parameters']['freq'] # 0 or 1, which frequency
+        amplitude = pulse.attributes['parameters']['amplitude'] # pulse width as fraction of period, defined as sigma
+        phase_shift = pulse.attributes['parameters']['phase'] # integrated weight of
+        
+        for site in self.site_dict.values():
+            n = np.array(site)
+            for m in [-1,1]: # loop over harmonics of pulse
+                # find the frequency connected by the mth harmonic
+                n2 = n.copy()
+                n2[freq]+=m
+                
+                # fold that back into the reduced zone
+                # keep track of the folding vector so that we can apply an appropriate phase
+                n2_folded,shift = Fold(n2,self.W, give_folding_vec=True)
+                overall_phase = np.exp(1j*(flux*shift+m*phase_shift)) # pick up flux each time you go around the compact direction 
+
+                key = (0,n2_folded[0],n2_folded[1]) # index of site that's connected by this harmonic
+                # check that new-site is in truncated strip
+                if key in self.inv_state_dict.keys():
+                    # if so, add the operator for the component
+                    state_index = self.inv_state_dict[key]
+                    self.K[state_index:state_index+self.d,state_index:state_index+self.d] += overall_phase * amplitude/2*operator
+    
+            
+    
+    def compute_spectrum(self,flux=0):
+        """
+        
+
+        Parameters
+        ----------
+        flux : float between 0 and 2pi
+            flux through compactified direction of reduced zone strip
+
+        Returns
+        -------
+        eigenvalues, eigenvectors in extended zone
+
+        """
+        self.setup_K(flux)
+        return la.eigh(self.K)
+    
     def plot_freq_lattice(self):
         """
         Scatter plot of kept frequencies
@@ -270,8 +373,8 @@ class FiboSim():
 
         """
         plt.figure()
-        for n1 in range(-L,L+1):
-            for n2 in range(-L*Fibonacci(self.N),L*Fibonacci(self.N)+1):
+        for n1 in range(-self.L,self.L+1):
+            for n2 in range(-self.L*Fibonacci(self.N),self.L*Fibonacci(self.N)+1):
                 n = np.array([n1,n2])
                 n_folded = Fold(n,self.W)
                 if np.sum(np.abs(n_folded-n))==0:
@@ -284,23 +387,46 @@ class FiboSim():
                 #else:
                 
 #%% dev
-d=2
-N=3
-L=5
-sim = FiboSim(d,N,L)
+# d=2
+# N=3
+# L=5
+# sim = FiboSim(d,N,L)
 
-# define the drive Hamiltonian
-# define gaussian pulse                  
-pulse_parameters = {'freq':0,
-                    'width':0.5,
-                    'weight':np.pi,
-                    'cutoff':5}
-pulse = Interaction({'type':'Gaussian',
-                     'operator':PAULI['X'],
-                     'parameters': pulse_parameters})
+
+
+# # define the drive Hamiltonian
+# # define gaussian pulse                  
+# pulse1 = Interaction({'type':'Gaussian',
+#                      'operator':PAULI['Z'],
+#                      'parameters': {'freq':0,
+#                                     'width':0.5,
+#                                     'weight':np.pi/2,
+#                                     'cutoff':1}
+#                      }
+#                     )
+# pulse2 = Interaction({'type':'Gaussian',
+#                      'operator':PAULI['Z'],
+#                      'parameters': {'freq':1,
+#                                     'width':0.5,
+#                                     'weight':np.pi/2,
+#                                     'cutoff':5}
+#                      }
+#                     )
+
         
-sim.interactions += [pulse]
-sim.setup_K()
-#sim.plot_freq_lattice()
+# sim.interactions = [pulse1,pulse2]
+# #sim.setup_K()
 
-# simulate the quasi-energy spectrum
+# N_sweep = 11
+# fluxes = np.linspace(-np.pi,np.pi,N_sweep)
+# Es =np.zeros([N_sweep,sim.Hsize])
+# for j in range(N_sweep):    
+#     Es[j,:],psi=sim.compute_spectrum(flux=fluxes[j])
+# #sim.plot_freq_lattice()
+
+# # simulate the quasi-energy spectrum
+# plt.figure()
+# ylim = 2*np.pi/Fibonacci(N+1)
+# plt.plot(fluxes,Es)
+# plt.ylim(-ylim,ylim)
+# plt.title('Width = %s' % Fibonacci(N) + ', L=%s'%L)
