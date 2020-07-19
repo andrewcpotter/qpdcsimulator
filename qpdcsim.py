@@ -101,7 +101,7 @@ def GaussianFT(width,weight,n):
         amplitude of nth Harmonic
 
     """
-    norm = width/np.sqrt(2*np.pi)
+    norm = 1.0/np.sqrt(2*np.pi)
     return weight*norm * np.exp(-width**2*n**2/2)
 
 #%% classes
